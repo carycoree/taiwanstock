@@ -1,0 +1,203 @@
+const FUGLE_BASE = "https://api.fugle.tw/marketdata/v1.0/stock";
+const TWSE_BASE = "https://www.twse.com.tw/rwd/zh";
+const TWSE_OPEN = "https://openapi.twse.com.tw/v1/opendata";
+
+const fallbackSymbols = [
+  ["0050","元大台灣50","ETF"],["1101","台泥","水泥"],["1301","台塑","塑膠"],
+  ["2002","中鋼","鋼鐵"],["2303","聯電","半導體"],["2308","台達電","電子零組件"],
+  ["2317","鴻海","電子零組件"],["2330","台積電","半導體"],["2379","瑞昱","半導體"],
+  ["2382","廣達","電腦及週邊"],["2408","南亞科","半導體"],["2454","聯發科","半導體"],
+  ["2881","富邦金","金融"],["2882","國泰金","金融"],["2891","中信金","金融"],
+  ["3008","大立光","光電"],["3711","日月光投控","半導體"],["6505","台塑化","油電燃氣"]
+].map(([symbol,name,industry])=>({symbol,name,industry,exchange:"TWSE"}));
+
+const json = (data, status=200, headers={}) => new Response(JSON.stringify(data), {
+  status, headers: {"content-type":"application/json; charset=utf-8","cache-control":"no-store",...headers}
+});
+
+const taipeiNow = () => new Intl.DateTimeFormat("sv-SE", {
+  timeZone:"Asia/Taipei",year:"numeric",month:"2-digit",day:"2-digit",
+  hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
+}).format(new Date());
+
+async function fugle(env, path) {
+  if (!env.FUGLE_API_KEY) throw new Error("FUGLE_API_KEY_MISSING");
+  const response = await fetch(`${FUGLE_BASE}${path}`, {
+    headers: {"X-API-KEY": env.FUGLE_API_KEY, accept:"application/json"}
+  });
+  if (!response.ok) throw new Error(`FUGLE_${response.status}`);
+  return response.json();
+}
+
+async function fetchJson(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(()=>controller.abort(), 8000);
+  try {
+    const response = await fetch(url, {
+      headers:{accept:"application/json","user-agent":"TaiwanStockIntelligence/1.0"},
+      signal:controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP_${response.status}`);
+    return response.json();
+  } finally { clearTimeout(timeout); }
+}
+
+const number = value => Number(String(value ?? "").replace(/,/g,"").replace(/--/g,"")) || 0;
+const isoFromRoc = value => {
+  const m=String(value||"").match(/(\d{2,3})\/(\d{1,2})\/(\d{1,2})/);
+  return m ? `${Number(m[1])+1911}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}` : value;
+};
+const dateKey = date => date.toISOString().slice(0,10).replaceAll("-","");
+const dateCandidates = (count=8) => Array.from({length:count},(_,i)=>new Date(Date.now()-i*86400000));
+const fieldIndex = (fields, patterns) => fields.findIndex(f=>patterns.some(p=>p.test(String(f))));
+const findTableRow = (payload, symbol) => {
+  for(const table of payload?.tables||[payload]){
+    const fields=table?.fields||payload?.fields||[], rows=table?.data||payload?.data||[];
+    const symbolIndex=Math.max(0,fieldIndex(fields,[/證券代號/,/股票代號/,/代號/]));
+    const row=rows.find(x=>String(x[symbolIndex]||"").trim()===symbol);
+    if(row)return{fields,row};
+  }
+  return null;
+};
+
+async function twseDaily(symbol) {
+  const months=Array.from({length:6},(_,i)=>{const d=new Date();d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()-i);return dateKey(d)});
+  const results=await Promise.all(months.map(async date=>{
+    try{
+      const raw=await fetchJson(`${TWSE_BASE}/afterTrading/STOCK_DAY?date=${date}&stockNo=${encodeURIComponent(symbol)}&response=json`);
+      return (raw?.data||[]).map(x=>({date:isoFromRoc(x[0]),volume:number(x[1]),open:number(x[3]),high:number(x[4]),low:number(x[5]),close:number(x[6])}));
+    }catch{return[]}
+  }));
+  return results.flat().filter(x=>x.date&&x.close).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+}
+
+async function latestOfficial(path, symbol, parser, selectType="ALL") {
+  for(const date of dateCandidates()){
+    try{
+      const raw=await fetchJson(`${TWSE_BASE}/${path}?date=${dateKey(date)}&selectType=${selectType}&response=json`);
+      const found=findTableRow(raw,symbol);
+      if(found)return parser(found.fields,found.row,dateKey(date));
+    }catch{}
+  }
+  return null;
+}
+
+async function officialPayload(symbol) {
+  const institutional=latestOfficial("fund/T86",symbol,(f,r,date)=>{
+    const pick=p=>number(r[fieldIndex(f,p)]);
+    return {date,foreign:pick([/外陸資買賣超股數.*不含外資自營商/,/外資及陸資.*買賣超/]),trust:pick([/投信買賣超/]),dealer:pick([/自營商買賣超/,/自營商.*合計/]),total:pick([/三大法人買賣超/]),source:"臺灣證券交易所"};
+  },"ALLBUT0999");
+  const margin=latestOfficial("marginTrading/MI_MARGN",symbol,(f,r,date)=>{
+    const pick=p=>number(r[fieldIndex(f,p)]);
+    return {date,marginBalance:pick([/融資.*今日餘額/,/融資餘額/]),shortBalance:pick([/融券.*今日餘額/,/融券餘額/]),source:"臺灣證券交易所"};
+  });
+  const revenue=(async()=>{
+    try{
+      const list=await fetchJson(`${TWSE_OPEN}/t187ap05_L`);
+      const row=(Array.isArray(list)?list:[]).find(x=>String(x["公司代號"]||x["公司代碼"]||"").trim()===symbol);
+      if(!row)return null;
+      return {period:row["資料年月"]||row["出表日期"]||"",monthly:number(row["當月營收"]),yoy:number(row["去年同月增減(%)"]||row["去年同月增減％"]),mom:number(row["上月比較增減(%)"]||row["上月比較增減％"]),source:"公開資訊觀測站／TWSE OpenAPI"};
+    }catch{return null}
+  })();
+  const [institutionData,marginData,revenueData]=await Promise.all([institutional,margin,revenue]);
+  return {
+    institutional:institutionData,margin:marginData,revenue:revenueData,
+    links:[
+      {label:"證交所基本市況",url:`https://mis.twse.com.tw/stock/fibest.jsp?stock=${symbol}`,provider:"TWSE"},
+      {label:"公開資訊觀測站",url:"https://mops.twse.com.tw/mops/web/index",provider:"MOPS"},
+      {label:"Yahoo 股市新聞",url:`https://tw.stock.yahoo.com/quote/${symbol}.TW/news`,provider:"Yahoo"}
+    ]
+  };
+}
+
+async function cached(request, seconds, loader) {
+  const cache = caches.default;
+  const cachedResponse = await cache.match(request);
+  if (cachedResponse) return cachedResponse;
+  const response = await loader();
+  if (response.ok) {
+    const copy = new Response(response.body, response);
+    copy.headers.set("cache-control", `public, max-age=${seconds}`);
+    await cache.put(request, copy.clone());
+    return copy;
+  }
+  return response;
+}
+
+const normalizeQuote = (raw, symbol) => {
+  const d = raw?.data || raw || {};
+  const last = Number(d.lastPrice ?? d.closePrice ?? d.close ?? 0);
+  const previous = Number(d.previousClose ?? d.previousClosePrice ?? d.referencePrice ?? 0);
+  return {
+    symbol, name:d.name || (symbol==="2330"?"台積電":symbol),
+    lastPrice:last, previousClose:previous,
+    change:Number(d.change ?? (last && previous ? last-previous : 0)),
+    changePercent:Number(d.changePercent ?? (last && previous ? (last-previous)/previous*100 : 0)),
+    openPrice:Number(d.openPrice ?? d.open ?? 0), highPrice:Number(d.highPrice ?? d.high ?? 0),
+    lowPrice:Number(d.lowPrice ?? d.low ?? 0), totalVolume:Number(d.total?.tradeVolume ?? d.totalVolume ?? d.volume ?? 0),
+    totalValue:Number(d.total?.tradeValue ?? d.totalValue ?? 0),
+    lastUpdated:d.lastUpdated || d.lastUpdate || new Date().toISOString(),
+    isClose:Boolean(d.isClose), source:"Fugle MarketData"
+  };
+};
+
+const normalizeCandles = raw => (raw?.data || raw || []).map(x=>({
+  date:x.date || x.time || x.timestamp, open:Number(x.open), high:Number(x.high),
+  low:Number(x.low), close:Number(x.close), volume:Number(x.volume || 0)
+})).filter(x=>x.date && Number.isFinite(x.close));
+
+async function stockPayload(env, symbol) {
+  const to = new Date().toISOString().slice(0,10);
+  const fromDate = new Date(Date.now()-1000*60*60*24*180).toISOString().slice(0,10);
+  const officialPromise=officialPayload(symbol);
+  let quote=null,candles=[],error=null;
+  try {
+    const [quoteRaw,candleRaw]=await Promise.all([
+      fugle(env,`/intraday/quote/${encodeURIComponent(symbol)}`),
+      fugle(env,`/historical/candles/${encodeURIComponent(symbol)}?from=${fromDate}&to=${to}&timeframe=D`)
+    ]);
+    quote=normalizeQuote(quoteRaw,symbol);candles=normalizeCandles(candleRaw);
+  } catch(e){error=String(e.message||e)}
+  if(!candles.length)candles=await twseDaily(symbol);
+  const official=await officialPromise;
+  const hasOfficial=Boolean(candles.length||official.institutional||official.margin||official.revenue);
+  return {
+    status:quote?"live":hasOfficial?"official_only":error==="FUGLE_API_KEY_MISSING"?"not_configured":"error",
+    provider:quote?"Fugle MarketData + TWSE":"TWSE／MOPS 公開資料",
+    fetchedAt:new Date().toISOString(),taipeiTime:taipeiNow(),quote,candles,official,error,
+    sources:[
+      {label:"即時行情",provider:"Fugle MarketData",state:quote?"live":"unavailable",updatedAt:quote?.lastUpdated},
+      {label:"歷史日線",provider:candles.length&&quote?"Fugle MarketData":"臺灣證券交易所",state:candles.length?"available":"unavailable",updatedAt:candles.at(-1)?.date},
+      {label:"三大法人／融資融券",provider:"臺灣證券交易所",state:official.institutional||official.margin?"available":"unavailable"},
+      {label:"月營收",provider:"公開資訊觀測站／TWSE OpenAPI",state:official.revenue?"available":"unavailable"}
+    ]
+  };
+}
+
+async function api(request, env, url) {
+  if (url.pathname === "/api/health") return json({
+    ok:true, provider:"Fugle MarketData", configured:Boolean(env.FUGLE_API_KEY),
+    serverTime:new Date().toISOString(), taipeiTime:taipeiNow()
+  });
+  if (url.pathname === "/api/search") {
+    const q=(url.searchParams.get("q")||"").trim().toLowerCase();
+    const results=fallbackSymbols.filter(x=>!q||x.symbol.includes(q)||x.name.toLowerCase().includes(q)).slice(0,8);
+    return json({status:"ok",results,source:"TWSE 股票主檔快取",updatedAt:new Date().toISOString()});
+  }
+  const match=url.pathname.match(/^\/api\/stock\/(\d{4,6})$/);
+  if (match) return cached(request, 300, async()=>json(await stockPayload(env,match[1])));
+  await env.ASSETS.fetch(request);
+  return json({error:"NOT_FOUND"},404);
+}
+
+export default {
+  async fetch(request, env) {
+    const url=new URL(request.url);
+    if(url.pathname.startsWith("/api/")) return api(request,env,url);
+    const response=await env.ASSETS.fetch(request);
+    const acceptsHtml=request.headers.get("accept")?.includes("text/html");
+    if(response.status!==404||!acceptsHtml||!["GET","HEAD"].includes(request.method)) return response;
+    const indexUrl=new URL(request.url);indexUrl.pathname="/index.html";indexUrl.search="";
+    return env.ASSETS.fetch(new Request(indexUrl,request));
+  }
+};
