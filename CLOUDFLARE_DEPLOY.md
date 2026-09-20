@@ -29,9 +29,25 @@ npx wrangler deploy
 
 金鑰會由 Cloudflare 加密保存，請勿寫入程式、`.env` 或公開儲存庫。
 
+### 本機測試
+
+將 `.dev.vars.example` 複製為 `.dev.vars`，再填入真實金鑰：
+
+```env
+FUGLE_API_KEY=請填入你的_Fugle_API_Key
+```
+
+啟動本機測試：
+
+```bash
+npx wrangler dev
+```
+
 ## 套件內容
 
 - `dist/client/`：前端網站
 - `dist/server/index.js`：Cloudflare Worker 與資料代理
 - `wrangler.jsonc`：Cloudflare 部署設定
+- `.dev.vars.example`：本機 Cloudflare 環境變數範本
+- `.env.example`：一般環境變數範本
 
