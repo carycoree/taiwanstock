@@ -1,6 +1,8 @@
 const FUGLE_BASE = "https://api.fugle.tw/marketdata/v1.0/stock";
 const TWSE_BASE = "https://www.twse.com.tw/rwd/zh";
 const TWSE_OPEN = "https://openapi.twse.com.tw/v1/opendata";
+const TPEX_OPEN = "https://www.tpex.org.tw/openapi/v1";
+let masterCache={at:0,rows:[]};
 
 const fallbackSymbols = [
   ["0050","元大台灣50","ETF"],["1101","台泥","水泥"],["1301","台塑","塑膠"],
@@ -110,6 +112,42 @@ async function officialPayload(symbol) {
   };
 }
 
+async function stockMaster(){
+  if(Date.now()-masterCache.at<3600000&&masterCache.rows.length)return masterCache.rows;
+  const [listed,otc]=await Promise.all([
+    fetchJson(`${TWSE_OPEN}/t187ap03_L`).catch(()=>[]),
+    fetchJson(`${TPEX_OPEN}/mopsfin_t187ap03_O`).catch(()=>[])
+  ]);
+  const normalize=(x,exchange)=>({
+    symbol:String(x["公司代號"]||x["公司代碼"]||x["SecuritiesCompanyCode"]||"").trim(),
+    name:String(x["公司簡稱"]||x["公司名稱"]||x["CompanyName"]||"").trim(),
+    industry:String(x["產業別"]||x["產業類別"]||x["SecuritiesIndustryCode"]||"其他").trim(),
+    exchange
+  });
+  const rows=[...(Array.isArray(listed)?listed:[]).map(x=>normalize(x,"TWSE")),...(Array.isArray(otc)?otc:[]).map(x=>normalize(x,"TPEx"))].filter(x=>/^\d{4,6}$/.test(x.symbol)&&x.name);
+  masterCache={at:Date.now(),rows:rows.length?rows:fallbackSymbols};return masterCache.rows;
+}
+
+async function marketPayload(){
+  for(const date of dateCandidates()){
+    try{
+      const raw=await fetchJson(`${TWSE_BASE}/afterTrading/MI_INDEX?date=${dateKey(date)}&type=ALLBUT0999&response=json`);
+      if(raw?.stat!=="OK"&&!raw?.tables?.length)continue;
+      let index=null,breadth={up:0,down:0,flat:0},stocks=[];
+      for(const table of raw.tables||[]){
+        const f=table.fields||[],d=table.data||[];
+        const code=fieldIndex(f,[/證券代號/]),name=fieldIndex(f,[/證券名稱/]),close=fieldIndex(f,[/收盤價/]),diff=fieldIndex(f,[/漲跌價差/]),sign=fieldIndex(f,[/漲跌\(\+\/-\)/]),volume=fieldIndex(f,[/成交股數/]);
+        if(code>=0&&close>=0)stocks=d.map(r=>{const c=number(r[close]),delta=number(r[diff])*(String(r[sign]||"").includes("-")?-1:1),prev=c-delta;return{symbol:String(r[code]).trim(),name:String(r[name]||"").trim(),close:c,change:delta,changePercent:prev?delta/prev*100:0,volume:number(r[volume])}}).filter(x=>x.symbol&&x.close);
+        const idxName=fieldIndex(f,[/^指數$/, /指數名稱/]),idxClose=fieldIndex(f,[/收盤指數/]),idxDiff=fieldIndex(f,[/漲跌點數/]),idxPct=fieldIndex(f,[/漲跌百分比/]);
+        if(idxName>=0){const row=d.find(r=>String(r[idxName]).includes("發行量加權股價指數"));if(row)index={name:"TAIEX",close:number(row[idxClose]),change:number(row[idxDiff])*(String(row[2]||"").includes("-")?-1:1),changePercent:number(row[idxPct])}}
+        for(const r of d){const label=String(r[0]||"");if(label.startsWith("上漲"))breadth.up=number(r[2]??r[1]);if(label.startsWith("下跌"))breadth.down=number(r[2]??r[1]);if(label.startsWith("持平")||label.startsWith("未成交"))breadth.flat+=number(r[2]??r[1])}
+      }
+      return{status:"ok",date:dateKey(date),index,breadth,movers:[...stocks].sort((a,b)=>b.changePercent-a.changePercent).slice(0,8),laggards:[...stocks].sort((a,b)=>a.changePercent-b.changePercent).slice(0,5),total:stocks.length,source:"臺灣證券交易所"};
+    }catch{}
+  }
+  return{status:"unavailable",date:null,index:null,breadth:{up:0,down:0,flat:0},movers:[],laggards:[],source:"臺灣證券交易所"};
+}
+
 async function cached(request, seconds, loader) {
   const cache = caches.default;
   const cachedResponse = await cache.match(request);
@@ -181,9 +219,11 @@ async function api(request, env, url) {
   });
   if (url.pathname === "/api/search") {
     const q=(url.searchParams.get("q")||"").trim().toLowerCase();
-    const results=fallbackSymbols.filter(x=>!q||x.symbol.includes(q)||x.name.toLowerCase().includes(q)).slice(0,8);
-    return json({status:"ok",results,source:"TWSE 股票主檔快取",updatedAt:new Date().toISOString()});
+    const master=await stockMaster();
+    const results=master.filter(x=>!q||x.symbol.includes(q)||x.name.toLowerCase().includes(q)).slice(0,12);
+    return json({status:"ok",results,source:"TWSE／TPEx 股票主檔",updatedAt:new Date().toISOString()});
   }
+  if(url.pathname==="/api/market")return cached(request,300,async()=>json(await marketPayload()));
   const match=url.pathname.match(/^\/api\/stock\/(\d{4,6})$/);
   if (match) return cached(request, 300, async()=>json(await stockPayload(env,match[1])));
   await env.ASSETS.fetch(request);
