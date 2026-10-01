@@ -5,7 +5,9 @@ const TPEX_OPEN = "https://www.tpex.org.tw/openapi/v1";
 let masterCache={at:0,rows:[]};
 
 const fallbackSymbols = [
-  ["0050","元大台灣50","ETF"],["1101","台泥","水泥"],["1301","台塑","塑膠"],
+  ["0050","元大台灣50","ETF"],["0056","元大高股息","ETF"],["006208","富邦台50","ETF"],
+  ["00878","國泰永續高股息","ETF"],["00919","群益台灣精選高息","ETF"],["00929","復華台灣科技優息","ETF"],
+  ["1101","台泥","水泥"],["1301","台塑","塑膠"],
   ["2002","中鋼","鋼鐵"],["2303","聯電","半導體"],["2308","台達電","電子零組件"],
   ["2317","鴻海","電子零組件"],["2330","台積電","半導體"],["2379","瑞昱","半導體"],
   ["2382","廣達","電腦及週邊"],["2408","南亞科","半導體"],["2454","聯發科","半導體"],
@@ -124,8 +126,12 @@ async function stockMaster(){
     industry:String(x["產業別"]||x["產業類別"]||x["SecuritiesIndustryCode"]||"其他").trim(),
     exchange
   });
-  const rows=[...(Array.isArray(listed)?listed:[]).map(x=>normalize(x,"TWSE")),...(Array.isArray(otc)?otc:[]).map(x=>normalize(x,"TPEx"))].filter(x=>/^\d{4,6}$/.test(x.symbol)&&x.name);
-  masterCache={at:Date.now(),rows:rows.length?rows:fallbackSymbols};return masterCache.rows;
+  const official=[...(Array.isArray(listed)?listed:[]).map(x=>normalize(x,"TWSE")),...(Array.isArray(otc)?otc:[]).map(x=>normalize(x,"TPEx"))].filter(x=>/^\d{4,6}$/.test(x.symbol)&&x.name);
+  // 公司基本資料不包含多數 ETF；固定合併保底清單，避免官方端點正常時反而找不到 0050 等商品。
+  const merged=new Map(fallbackSymbols.map(x=>[x.symbol,x]));
+  official.forEach(x=>merged.set(x.symbol,x));
+  const rows=[...merged.values()];
+  masterCache={at:Date.now(),rows};return masterCache.rows;
 }
 
 async function marketPayload(){
@@ -133,19 +139,35 @@ async function marketPayload(){
     try{
       const raw=await fetchJson(`${TWSE_BASE}/afterTrading/MI_INDEX?date=${dateKey(date)}&type=ALLBUT0999&response=json`);
       if(raw?.stat!=="OK"&&!raw?.tables?.length)continue;
-      let index=null,breadth={up:0,down:0,flat:0},stocks=[];
+      let index=null,breadth={up:0,down:0,flat:0},stocks=[],sectors=[];
       for(const table of raw.tables||[]){
         const f=table.fields||[],d=table.data||[];
-        const code=fieldIndex(f,[/證券代號/]),name=fieldIndex(f,[/證券名稱/]),close=fieldIndex(f,[/收盤價/]),diff=fieldIndex(f,[/漲跌價差/]),sign=fieldIndex(f,[/漲跌\(\+\/-\)/]),volume=fieldIndex(f,[/成交股數/]);
-        if(code>=0&&close>=0)stocks=d.map(r=>{const c=number(r[close]),delta=number(r[diff])*(String(r[sign]||"").includes("-")?-1:1),prev=c-delta;return{symbol:String(r[code]).trim(),name:String(r[name]||"").trim(),close:c,change:delta,changePercent:prev?delta/prev*100:0,volume:number(r[volume])}}).filter(x=>x.symbol&&x.close);
-        const idxName=fieldIndex(f,[/^指數$/, /指數名稱/]),idxClose=fieldIndex(f,[/收盤指數/]),idxDiff=fieldIndex(f,[/漲跌點數/]),idxPct=fieldIndex(f,[/漲跌百分比/]);
-        if(idxName>=0){const row=d.find(r=>String(r[idxName]).includes("發行量加權股價指數"));if(row)index={name:"TAIEX",close:number(row[idxClose]),change:number(row[idxDiff])*(String(row[2]||"").includes("-")?-1:1),changePercent:number(row[idxPct])}}
-        for(const r of d){const label=String(r[0]||"");if(label.startsWith("上漲"))breadth.up=number(r[2]??r[1]);if(label.startsWith("下跌"))breadth.down=number(r[2]??r[1]);if(label.startsWith("持平")||label.startsWith("未成交"))breadth.flat+=number(r[2]??r[1])}
+        const code=fieldIndex(f,[/證券代號/]),name=fieldIndex(f,[/證券名稱/]),close=fieldIndex(f,[/收盤價/]),diff=fieldIndex(f,[/漲跌價差/]),sign=fieldIndex(f,[/漲跌\(\+\/-\)/]),volume=fieldIndex(f,[/成交股數/]),value=fieldIndex(f,[/成交金額/]);
+        if(code>=0&&close>=0)stocks=d.map(r=>{const c=number(r[close]),delta=number(r[diff])*(String(r[sign]||"").includes("-")?-1:1),prev=c-delta;return{symbol:String(r[code]).trim(),name:String(r[name]||"").trim(),close:c,change:delta,changePercent:prev?delta/prev*100:0,volume:number(r[volume]),value:number(r[value])}}).filter(x=>x.symbol&&x.close);
+        const idxName=fieldIndex(f,[/^指數$/, /指數名稱/]),idxClose=fieldIndex(f,[/收盤指數/]),idxDiff=fieldIndex(f,[/漲跌點數/]),idxPct=fieldIndex(f,[/漲跌百分比/]),idxSign=fieldIndex(f,[/漲跌\(\+\/-\)/]);
+        if(idxName>=0){
+          const row=d.find(r=>String(r[idxName]).includes("發行量加權股價指數"));
+          if(row){const dir=String(row[idxSign]||"").includes("-")?-1:1;index={name:"TAIEX",close:number(row[idxClose]),change:Math.abs(number(row[idxDiff]))*dir,changePercent:Math.abs(number(row[idxPct]))*dir}}
+          sectors=d.map(r=>{const dir=String(r[idxSign]||"").includes("-")?-1:1;return{name:String(r[idxName]||"").replace(/類指數.*$/,"類"),changePercent:Math.abs(number(r[idxPct]))*dir}}).filter(x=>x.name.endsWith("類")&&Number.isFinite(x.changePercent)).sort((a,b)=>b.changePercent-a.changePercent).slice(0,12);
+        }
+        for(const r of d){
+          const label=String(r[0]||"").trim(),match=r.slice(1).join(" ").match(/[\d,]+/),count=match?number(match[0]):0;
+          if(label.startsWith("上漲"))breadth.up=Math.max(breadth.up,count);
+          if(label.startsWith("下跌"))breadth.down=Math.max(breadth.down,count);
+          if(label.startsWith("持平")||label.startsWith("未成交"))breadth.flat+=count;
+        }
       }
-      return{status:"ok",date:dateKey(date),index,breadth,movers:[...stocks].sort((a,b)=>b.changePercent-a.changePercent).slice(0,8),laggards:[...stocks].sort((a,b)=>a.changePercent-b.changePercent).slice(0,5),total:stocks.length,source:"臺灣證券交易所"};
+      let institutional={buys:[],sells:[]};
+      try{
+        const inst=await fetchJson(`${TWSE_BASE}/fund/T86?date=${dateKey(date)}&selectType=ALLBUT0999&response=json`),table=(inst.tables||[]).find(t=>fieldIndex(t.fields||[],[/證券代號/])>=0);
+        if(table){const f=table.fields||[],ci=fieldIndex(f,[/證券代號/]),ni=fieldIndex(f,[/證券名稱/]),ti=fieldIndex(f,[/三大法人買賣超/,/合計買賣超/]);const rows=(table.data||[]).map(r=>({symbol:String(r[ci]||"").trim(),name:String(r[ni]||"").trim(),net:number(r[ti])})).filter(x=>x.symbol&&x.net);institutional={buys:[...rows].sort((a,b)=>b.net-a.net).slice(0,5),sells:[...rows].sort((a,b)=>a.net-b.net).slice(0,5)}}
+      }catch{}
+      const turnover=stocks.reduce((sum,x)=>sum+x.value,0),volume=stocks.reduce((sum,x)=>sum+x.volume,0),maxVolume=Math.max(...stocks.map(x=>x.volume),1);
+      const aiPicks=stocks.filter(x=>x.changePercent>0&&x.volume>0).map(x=>{const momentum=Math.min(40,x.changePercent*4),liquidity=Math.min(30,Math.log10(x.volume+1)/Math.log10(maxVolume+1)*30),score=Math.round(30+momentum+liquidity);return{symbol:x.symbol,name:x.name,close:x.close,changePercent:x.changePercent,volume:x.volume,score:Math.min(99,score),signal:x.changePercent>=7?"強勢動能":x.changePercent>=3?"量價轉強":"相對強勢"}}).sort((a,b)=>b.score-a.score||b.changePercent-a.changePercent).slice(0,6);
+      return{status:"ok",date:dateKey(date),index,breadth,sectors,liquidity:{turnover,volume,listed:stocks.length},institutional,aiPicks,movers:[...stocks].sort((a,b)=>b.changePercent-a.changePercent).slice(0,8),laggards:[...stocks].sort((a,b)=>a.changePercent-b.changePercent).slice(0,5),total:stocks.length,source:"臺灣證券交易所"};
     }catch{}
   }
-  return{status:"unavailable",date:null,index:null,breadth:{up:0,down:0,flat:0},movers:[],laggards:[],source:"臺灣證券交易所"};
+  return{status:"unavailable",date:null,index:null,breadth:{up:0,down:0,flat:0},sectors:[],liquidity:null,institutional:{buys:[],sells:[]},aiPicks:[],movers:[],laggards:[],source:"臺灣證券交易所"};
 }
 
 async function cached(request, seconds, loader) {
