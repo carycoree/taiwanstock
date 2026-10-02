@@ -1,6 +1,6 @@
 // worker/index-history.js
 function normalizeIndexHistory(raw) {
-  const rows = raw?.data || [];
+  const rows = Array.isArray(raw) ? raw.map((x) => [String(x.Date || "").replace(/^(\d{3})(\d{2})(\d{2})$/, "$1/$2/$3"), x.OpeningIndex, x.HighestIndex, x.LowestIndex, x.ClosingIndex]) : raw?.data || [];
   const result = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const match = String(row[0] || "").match(/^(\d{2,4})\/(\d{1,2})\/(\d{1,2})$/);
@@ -597,7 +597,7 @@ async function stockPayload(env, symbol) {
 }
 async function api(request, env, url) {
   if (url.pathname.startsWith("/api/auth/")) return authApi(request, env, url);
-  if (!["/api/health", "/api/search", "/api/market", "/api/night", "/api/sector", "/api/watchlist", "/api/watchlist/prices", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/(?:\d{4,6}|\d{4,5}[A-Z])$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
+  if (!["/api/health", "/api/search", "/api/index-history", "/api/market", "/api/night", "/api/sector", "/api/watchlist", "/api/watchlist/prices", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/(?:\d{4,6}|\d{4,5}[A-Z])$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
     await env.ASSETS.fetch(request);
     return json({ error: "NOT_FOUND" }, 404);
   }
@@ -630,13 +630,20 @@ async function api(request, env, url) {
       const month = new Date(now.getFullYear(), now.getMonth() - offset, 1);
       const key = `${month.getFullYear()}${String(month.getMonth() + 1).padStart(2, "0")}01`;
       try {
-        return normalizeIndexHistory(await fetchJson(`${TWSE_BASE}/indicesReport/MI_5MINS_HIST?date=${key}&response=json`));
+        return normalizeIndexHistory(await fetchJson(`https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?date=${key}&response=json`));
       } catch {
         return [];
       }
     }));
-    const candles = [...new Map(reports.flat().map((x) => [x.time, x])).values()].sort((a, b) => a.time.localeCompare(b.time));
-    return json({ candles, partial: reports.some((x) => !x.length), source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240", fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }, candles.length ? 200 : 503);
+    let fallback = [];
+    if (reports.some((x) => !x.length)) {
+      try {
+        fallback = normalizeIndexHistory(await fetchJson("https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST"));
+      } catch {
+      }
+    }
+    const candles = [...new Map([...fallback, ...reports.flat()].map((x) => [x.time, x])).values()].sort((a, b) => a.time.localeCompare(b.time));
+    return json({ candles, partial: reports.some((x) => !x.length), source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240", message: !candles.length ? "\u8B49\u4EA4\u6240\u65E5 K \u8CC7\u6599\u4F86\u6E90\u66AB\u6642\u7121\u6CD5\u53D6\u5F97\uFF0C\u8ACB\u7A0D\u5F8C\u66F4\u65B0" : null, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }, candles.length ? 200 : 503);
   });
   if (url.pathname === "/api/market") return cached(request, 300, async () => json((({ stocks, ...publicData }) => publicData)(await currentMarket())));
   if (url.pathname === "/api/sector") {
