@@ -1,9 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "taiwan-stock-intelligence",
+  "name": "taiwanstock",
   "main": "dist/server/index.js",
   "compatibility_date": "2026-09-20",
-  "vars": { "APP_AUTH_MODE": "account" },
+  "vars": { "APP_AUTH_MODE": "account", "OPENAI_MODEL": "gpt-4o-mini" },
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS",

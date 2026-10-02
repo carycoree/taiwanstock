@@ -106,3 +106,40 @@ npx wrangler dev
 - `wrangler.jsonc`：Cloudflare 部署設定
 - `.dev.vars.example`：本機 Cloudflare 環境變數範本
 - `.env.example`：一般環境變數範本
+
+## OpenAI 分析與熱力圖更新（2026-10-02）
+
+本次更新需同時部署 `dist/server/index.js` 與 `dist/client/`，僅新增金鑰不會替舊網站加入功能。沿用現有 taiwanstock Worker、DB → db 綁定和登入設定。這次不新增資料表、不需要重建 DB。
+
+### 取得 OpenAI API 金鑰
+
+1. 開啟 https://platform.openai.com/ ，登入並建立專案（例如 TaiwanStock）。
+2. 在 https://platform.openai.com/settings/organization/billing/overview 設定 API 付款／可用額度。API 按用量計費，請檢查帳務頁與 Usage。
+3. 開啟 https://platform.openai.com/api-keys ，選擇網站專案並建立新的 Secret Key，名稱可用 TaiwanStock-Cloudflare。
+4. 將金鑰存入密碼管理器並貼至 Cloudflare Secret。不要放在前端或傳到對話裡。
+
+### Cloudflare 網頁設定
+
+Workers & Pages → taiwanstock → Settings → Variables and Secrets → Add：
+
+| 名稱 | Type | 值 |
+| --- | --- | --- |
+| OPENAI_API_KEY | Secret | 你的 OpenAI API 金鑰 |
+| OPENAI_MODEL | Text | gpt-4o-mini |
+| APP_AUTH_MODE | Text | account（保留原設定） |
+
+儲存並 Deploy 至正式版本（100% 流量）。DB 綁定仍必須叫 DB，值仍選既有 db。不要以新 Worker 取代原網站。
+
+### 使用與驗證
+
+- 在「AI 分析」按「產生 AI 分析」；可填入最多500字的問題，之後的追問為根據當次行情的新分析，並不保存聊天歷史。
+- 「AI Market Brief」也有市場／夜盤分析按鈕。夜盤只使用期交所盤後報表，不能當作即時夜盤報價。
+- 沒有金鑰時顯示設定提示；登入後 /api/ai/status 僅顯示 configured 與 model，不回傳金鑰。
+- 金鑰錯誤、額度受限、模型不可用與逾時有明確提示。沒有足夠行情不呼叫 AI。
+- 每個帳號每小時最多30次 API 嘗試；按下按鈕才呼叫。OpenAI request 設定 store:false；本服務不保存分析內容。這不等同 OpenAI Zero Data Retention。
+- 只傳公開行情與使用者輸入的問題；不自動传送持股、登入帳號、密碼或初始化碼。
+- 原均線結論為「規則判讀」，AI 模型結果另行標示。移除原先以價格偏離均線推算的信心百分比。
+- Heatmap 點類股可查看上市公司股票、收盤價、漲跌幅、成交股數，依漲／跌／成交量排序，篩選上漲股，再點股票進入研究。強勢標記代表類股漲幅前五且上漲，並非模型選股。
+- 成分股清單依 TWSE 公司產業分類與可用當日行情對照，不代表指數權重名單；上櫃股票不混入上市類股。無法對應的類股不使用猜測清單。
+
+程式已做模擬 API 與登入／限制測試。未使用真實 OpenAI 金鑰進行付費呼叫；需設定金鑰、部署更新後驗證正式連線。
