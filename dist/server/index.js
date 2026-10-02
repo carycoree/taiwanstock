@@ -1,3 +1,14 @@
+// shared/watchlist.mjs
+function validateWatchlist(items) {
+  if (!Array.isArray(items) || items.length > 30) throw new Error("\u81EA\u9078\u80A1\u6700\u591A30\u6A94");
+  const seen = /* @__PURE__ */ new Set();
+  return items.map((item) => {
+    if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || !/^\d{4,6}$/.test(item[0]) || typeof item[1] !== "string" || item[1].length > 60 || seen.has(item[0])) throw new Error("\u81EA\u9078\u80A1\u683C\u5F0F\u932F\u8AA4\u6216\u4EE3\u78BC\u91CD\u8907");
+    seen.add(item[0]);
+    return [item[0], item[1].trim() || item[0]];
+  });
+}
+
 // shared/sectors.mjs
 var groups = {
   "\u6C34\u6CE5": ["01"],
@@ -44,6 +55,19 @@ function sectorStocks(name, stocks, master) {
   if (!codes) return { supported: false, rows: [] };
   const members = new Map(master.filter((x) => x.exchange === "TWSE" && (codes.includes(x.industry.padStart(2, "0")) || x.industry === label)).map((x) => [x.symbol, x]));
   return { supported: true, rows: stocks.filter((x) => members.has(x.symbol)).map((x) => ({ ...x, industry: members.get(x.symbol).industry })).sort((a, b) => b.changePercent - a.changePercent || b.volume - a.volume) };
+}
+function sectorHeat(sectors, stocks, master) {
+  const listed = new Set(master.filter((x) => x.exchange === "TWSE").map((x) => x.symbol));
+  const marketValue = stocks.filter((x) => listed.has(x.symbol)).reduce((sum, x) => sum + Math.max(0, Number(x.value) || 0), 0);
+  return sectors.map((sector) => {
+    const group = sectorStocks(sector.name, stocks, master);
+    const rows = group.rows.filter((x) => Number.isFinite(x.changePercent) && x.volume > 0);
+    const count = rows.length, up = rows.filter((x) => x.changePercent > 0).length;
+    const value = rows.reduce((sum, x) => sum + Math.max(0, Number(x.value) || 0), 0);
+    const upRatio = count ? up / count * 100 : null, turnoverShare = marketValue > 0 ? value / marketValue * 100 : null;
+    const heatScore = count && turnoverShare !== null && Number.isFinite(sector.changePercent) ? Math.round((upRatio / 100 * 50 + Math.max(0, Math.min(1, sector.changePercent / 5)) * 30 + Math.min(1, turnoverShare / 20) * 20) * 10) / 10 : null;
+    return { ...sector, count, up, upRatio, turnoverShare, heatScore, supported: group.supported };
+  }).sort((a, b) => (b.heatScore ?? -1) - (a.heatScore ?? -1) || b.changePercent - a.changePercent);
 }
 
 // worker/ai.js
@@ -432,7 +456,7 @@ async function marketPayload() {
           if (label.startsWith("\u6301\u5E73") || label.startsWith("\u672A\u6210\u4EA4")) breadth.flat += count;
         }
       }
-      const sectors = [...sectorMap.values()].sort((a, b) => b.changePercent - a.changePercent).slice(0, 12);
+      const sectors = [...sectorMap.values()].sort((a, b) => b.changePercent - a.changePercent);
       let institutional = { buys: [], sells: [] };
       try {
         const inst = await fetchJson(`${TWSE_BASE}/fund/T86?date=${dateKey(date)}&selectType=ALLBUT0999&response=json`), table = (inst.tables || []).find((t) => fieldIndex(t.fields || [], [/證券代號/]) >= 0);
@@ -448,7 +472,7 @@ async function marketPayload() {
         const momentum = Math.min(40, x.changePercent * 4), liquidity = Math.min(30, Math.log10(x.volume + 1) / Math.log10(maxVolume + 1) * 30), score = Math.round(30 + momentum + liquidity);
         return { symbol: x.symbol, name: x.name, close: x.close, changePercent: x.changePercent, volume: x.volume, score: Math.min(99, score), signal: x.changePercent >= 7 ? "\u5F37\u52E2\u52D5\u80FD" : x.changePercent >= 3 ? "\u91CF\u50F9\u8F49\u5F37" : "\u76F8\u5C0D\u5F37\u52E2" };
       }).sort((a, b) => b.score - a.score || b.changePercent - a.changePercent).slice(0, 6);
-      return { status: "ok", date: dateKey(date), index, breadth, sectors, stocks, liquidity: { turnover, volume, listed: stocks.length }, institutional, aiPicks, movers: [...stocks].sort((a, b) => b.changePercent - a.changePercent).slice(0, 8), laggards: [...stocks].sort((a, b) => a.changePercent - b.changePercent).slice(0, 5), total: stocks.length, source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240" };
+      return { status: "ok", fetchedAt: (/* @__PURE__ */ new Date()).toISOString(), date: dateKey(date), index, breadth, sectors, sectorHeat: sectorHeat(sectors, stocks, await stockMaster()), stocks, liquidity: { turnover, volume, listed: stocks.length }, institutional, aiPicks, movers: [...stocks].sort((a, b) => b.changePercent - a.changePercent).slice(0, 8), laggards: [...stocks].sort((a, b) => a.changePercent - b.changePercent).slice(0, 5), total: stocks.length, source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240" };
     } catch {
     }
   }
@@ -538,7 +562,7 @@ async function stockPayload(env, symbol) {
 }
 async function api(request, env, url) {
   if (url.pathname.startsWith("/api/auth/")) return authApi(request, env, url);
-  if (!["/api/health", "/api/search", "/api/market", "/api/night", "/api/sector", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/\d{4,6}$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
+  if (!["/api/health", "/api/search", "/api/market", "/api/night", "/api/sector", "/api/watchlist", "/api/watchlist/prices", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/\d{4,6}$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
     await env.ASSETS.fetch(request);
     return json({ error: "NOT_FOUND" }, 404);
   }
@@ -549,6 +573,7 @@ async function api(request, env, url) {
       return json({ message: "\u767B\u5165\u670D\u52D9\u66AB\u6642\u7121\u6CD5\u4F7F\u7528" }, 503);
     }
   }
+  if (url.pathname.startsWith("/api/watchlist")) return watchlistApi(request, env, url);
   if (url.pathname.startsWith("/api/portfolio")) return portfolioApi(request, env, url);
   if (url.pathname === "/api/health") return json({
     ok: true,
@@ -604,7 +629,7 @@ async function api(request, env, url) {
       const result = await generateAnalysis(env, snapshot, question);
       return json({ ...result, scope, symbol: scope === "stock" ? symbol : null, dataDate: scope === "market" ? data.date : data.candles?.at(-1)?.date, source: scope === "market" ? data.source : data.provider });
     } catch (e) {
-      return json({ message: e.name === "TimeoutError" ? "AI \u56DE\u61C9\u903E\u6642\uFF0C\u8ACB\u7A0D\u5F8C\u518D\u8A66" : e.status === 502 ? e.message : e.message === "AI \u672A\u5B8C\u6210\u5206\u6790\uFF0C\u8ACB\u7E2E\u77ED\u554F\u984C\u5F8C\u91CD\u8A66\u3002" ? e.message : "\u5206\u6790\u670D\u52D9\u66AB\u6642\u7121\u6CD5\u4F7F\u7528" }, 502);
+      return json({ message: e.name === "TimeoutError" ? "AI \u56DE\u61C9\u903E\u6642\uFF0C\u8ACB\u7A0D\u5F8C\u518D\u8A66" : [502, 503].includes(e.status) ? e.message : e.message === "AI \u672A\u5B8C\u6210\u5206\u6790\uFF0C\u8ACB\u7E2E\u77ED\u554F\u984C\u5F8C\u91CD\u8A66\u3002" ? e.message : "\u5206\u6790\u670D\u52D9\u66AB\u6642\u7121\u6CD5\u4F7F\u7528" }, 502);
     }
   }
   if (url.pathname === "/api/night") return json(await currentNight());
@@ -612,6 +637,47 @@ async function api(request, env, url) {
   if (match) return cached(request, 30, async () => json(await stockPayload(env, match[1])));
   await env.ASSETS.fetch(request);
   return json({ error: "NOT_FOUND" }, 404);
+}
+async function watchlistApi(request, env, url) {
+  const owner = await portfolioOwner(request, env);
+  if (!owner) return json({ message: "\u8ACB\u5148\u767B\u5165" }, 401);
+  if (url.pathname === "/api/watchlist/prices") {
+    if (request.method !== "GET") return json({ message: "\u8ACB\u4F7F\u7528 GET" }, 405);
+    const symbols = [...new Set((url.searchParams.get("symbols") || "").split(",").filter(Boolean))];
+    if (symbols.length > 30 || symbols.some((x) => !/^\d{4,6}$/.test(x))) return json({ message: "\u4EE3\u78BC\u932F\u8AA4\u6216\u8D85\u904E30\u6A94" }, 400);
+    if (!symbols.length) return json({ quotes: {}, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    const market = await currentMarket(), prices = await portfolioPrices(env, symbols);
+    for (const symbol of symbols) {
+      const official = market.stocks?.find((x) => x.symbol === symbol), quote = prices.quotes[symbol];
+      if (quote.kind === "official_close" && official) Object.assign(quote, { price: official.close, asOf: market.date, changePercent: official.changePercent, volume: official.volume });
+    }
+    return json(prices);
+  }
+  if (!env.DB) return json({ message: "\u81EA\u9078\u80A1\u8CC7\u6599\u5EAB\u5C1A\u672A\u7D81\u5B9A" }, 503);
+  try {
+    if (request.method === "GET") {
+      const row = await env.DB.prepare("SELECT payload, revision, updated_at FROM watchlists WHERE owner_id = ?").bind(owner).first();
+      return json({ items: row ? JSON.parse(row.payload) : [], revision: row?.revision || 0, updatedAt: row?.updated_at || null });
+    }
+    if (request.method !== "PUT") return json({ message: "\u8ACB\u4F7F\u7528 GET \u6216 PUT" }, 405);
+    if (request.headers.get("origin") !== url.origin) return json({ message: "\u4E0D\u5141\u8A31\u8DE8\u7AD9\u5132\u5B58" }, 403);
+    const raw = await request.text();
+    if (raw.length > 1e4) return json({ message: "\u8CC7\u6599\u904E\u5927" }, 413);
+    let body, items;
+    try {
+      body = JSON.parse(raw);
+      items = validateWatchlist(body.items);
+    } catch (e) {
+      return json({ message: e.message || "\u683C\u5F0F\u932F\u8AA4" }, 400);
+    }
+    if (!Number.isInteger(body.revision) || body.revision < 0) return json({ message: "\u8CC7\u6599\u7248\u672C\u7121\u6548" }, 400);
+    const now = (/* @__PURE__ */ new Date()).toISOString(), payload = JSON.stringify(items);
+    const result = body.revision === 0 ? await env.DB.prepare("INSERT INTO watchlists (owner_id,payload,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT(owner_id) DO NOTHING").bind(owner, payload, now).run() : await env.DB.prepare("UPDATE watchlists SET payload = ?, revision = revision + 1, updated_at = ? WHERE owner_id = ? AND revision = ?").bind(payload, now, owner, body.revision).run();
+    if (!result.meta?.changes) return json({ message: "\u53E6\u4E00\u500B\u8996\u7A97\u5DF2\u4FEE\u6539\u81EA\u9078\u80A1\uFF0C\u8ACB\u91CD\u65B0\u8F09\u5165\u6E05\u55AE\u5F8C\u518D\u4FEE\u6539" }, 409);
+    return json({ items, revision: body.revision + 1, updatedAt: now });
+  } catch {
+    return json({ message: "\u81EA\u9078\u80A1\u8CC7\u6599\u5EAB\u5C1A\u672A\u5C31\u7DD2\uFF0C\u8ACB\u57F7\u884C\u90E8\u7F72\u5305\u5167 0002_watchlists.sql\uFF1B\u539F\u6E05\u55AE\u4FDD\u7559" }, 503);
+  }
 }
 async function portfolioOwner(request, env) {
   return (await sessionUser(request, env))?.owner_id || null;
@@ -627,7 +693,7 @@ async function portfolioPrices(env, symbols) {
     let quote = null;
     if (env.FUGLE_API_KEY) try {
       const raw = await fugle(env, `/intraday/quote/${symbol}`), d = raw?.data || raw || {}, q = normalizeQuote(raw, symbol);
-      if (q.lastPrice > 0) quote = { price: q.lastPrice, source: q.source, asOf: d.lastUpdated || d.lastUpdate || null, kind: q.isClose ? "close" : "quote" };
+      if (q.lastPrice > 0) quote = { price: q.lastPrice, source: q.source, asOf: d.lastUpdated || d.lastUpdate || null, kind: q.isClose ? "close" : "quote", changePercent: q.changePercent, volume: q.totalVolume };
     } catch {
     }
     if (!quote) {

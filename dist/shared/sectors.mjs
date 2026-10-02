@@ -16,3 +16,18 @@ export function sectorStocks(name, stocks, master) {
   const members = new Map(master.filter(x=>x.exchange==='TWSE' && (codes.includes(x.industry.padStart(2,'0')) || x.industry===label)).map(x=>[x.symbol,x]));
   return {supported:true, rows:stocks.filter(x=>members.has(x.symbol)).map(x=>({...x,industry:members.get(x.symbol).industry})).sort((a,b)=>b.changePercent-a.changePercent||b.volume-a.volume)};
 }
+
+// Scores rank observed closing data, never predict returns. Composite sectors overlap.
+export function sectorHeat(sectors, stocks, master) {
+  const listed=new Set(master.filter(x=>x.exchange==='TWSE').map(x=>x.symbol));
+  const marketValue=stocks.filter(x=>listed.has(x.symbol)).reduce((sum,x)=>sum+Math.max(0,Number(x.value)||0),0);
+  return sectors.map(sector=>{
+    const group=sectorStocks(sector.name,stocks,master);
+    const rows=group.rows.filter(x=>Number.isFinite(x.changePercent)&&x.volume>0);
+    const count=rows.length,up=rows.filter(x=>x.changePercent>0).length;
+    const value=rows.reduce((sum,x)=>sum+Math.max(0,Number(x.value)||0),0);
+    const upRatio=count?up/count*100:null,turnoverShare=marketValue>0?value/marketValue*100:null;
+    const heatScore=count&&turnoverShare!==null&&Number.isFinite(sector.changePercent)?Math.round((upRatio/100*50+Math.max(0,Math.min(1,sector.changePercent/5))*30+Math.min(1,turnoverShare/20)*20)*10)/10:null;
+    return {...sector,count,up,upRatio,turnoverShare,heatScore,supported:group.supported};
+  }).sort((a,b)=>(b.heatScore??-1)-(a.heatScore??-1)||b.changePercent-a.changePercent);
+}
