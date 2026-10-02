@@ -3,6 +3,7 @@
   "name": "taiwan-stock-intelligence",
   "main": "dist/server/index.js",
   "compatibility_date": "2026-09-20",
+  "vars": { "APP_AUTH_MODE": "account" },
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS",
