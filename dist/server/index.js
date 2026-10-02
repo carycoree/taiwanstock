@@ -12,6 +12,13 @@ function normalizeIndexHistory(raw) {
   }
   return [...result.values()].sort((a, b) => a.time.localeCompare(b.time));
 }
+function normalizeIndexVolume(raw) {
+  const entries = Array.isArray(raw) ? raw.map((x) => [String(x.Date || "").replace(/^(\d{3})(\d{2})(\d{2})$/, "$1/$2/$3"), x.TradeVolume]) : raw?.data || [];
+  return entries.flatMap((r) => {
+    const m = String(r[0]).match(/^(\d{2,4})\/(\d{1,2})\/(\d{1,2})$/), v = Number(String(r[1] ?? "").replaceAll(",", ""));
+    return m && r[1] != null && String(r[1]).trim() !== "" && Number.isFinite(v) && v >= 0 ? [{ time: `${+m[1] < 1911 ? +m[1] + 1911 : +m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`, volume: v }] : [];
+  });
+}
 
 // shared/watchlist.mjs
 function validateWatchlist(items) {
@@ -626,24 +633,30 @@ async function api(request, env, url) {
   }
   if (url.pathname === "/api/index-history") return cached(request, 300, async () => {
     const now = new Date((/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
-    const reports = await Promise.all([0, 1, 2].map(async (offset) => {
+    const reports = await Promise.all([0, 1, 2, 3, 4, 5].map(async (offset) => {
       const month = new Date(now.getFullYear(), now.getMonth() - offset, 1);
       const key = `${month.getFullYear()}${String(month.getMonth() + 1).padStart(2, "0")}01`;
-      try {
-        return normalizeIndexHistory(await fetchJson(`https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?date=${key}&response=json`));
-      } catch {
-        return [];
-      }
+      const [prices, volumes] = await Promise.all([
+        fetchJson(`https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?date=${key}&response=json`).then(normalizeIndexHistory).catch(() => []),
+        fetchJson(`https://www.twse.com.tw/exchangeReport/FMTQIK?date=${key}&response=json`).then(normalizeIndexVolume).catch(() => [])
+      ]);
+      return { prices, volumes };
     }));
     let fallback = [];
-    if (reports.some((x) => !x.length)) {
+    if (reports.some((x) => !x.prices.length)) {
       try {
         fallback = normalizeIndexHistory(await fetchJson("https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST"));
       } catch {
       }
     }
-    const candles = [...new Map([...fallback, ...reports.flat()].map((x) => [x.time, x])).values()].sort((a, b) => a.time.localeCompare(b.time));
-    return json({ candles, partial: reports.some((x) => !x.length), source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240", message: !candles.length ? "\u8B49\u4EA4\u6240\u65E5 K \u8CC7\u6599\u4F86\u6E90\u66AB\u6642\u7121\u6CD5\u53D6\u5F97\uFF0C\u8ACB\u7A0D\u5F8C\u66F4\u65B0" : null, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }, candles.length ? 200 : 503);
+    let volumeFallback = [];
+    if (reports.some((x) => !x.volumes.length)) try {
+      volumeFallback = normalizeIndexVolume(await fetchJson("https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"));
+    } catch {
+    }
+    const volumeMap = new Map([...volumeFallback, ...reports.flatMap((x) => x.volumes)].map((x) => [x.time, x.volume]));
+    const candles = [...new Map([...fallback, ...reports.flatMap((x) => x.prices)].map((x) => [x.time, x])).values()].sort((a, b) => a.time.localeCompare(b.time)).map((x) => ({ ...x, volume: volumeMap.get(x.time) ?? null }));
+    return json({ candles, partial: reports.some((x) => !x.prices.length), source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240", message: !candles.length ? "\u8B49\u4EA4\u6240\u65E5 K \u8CC7\u6599\u4F86\u6E90\u66AB\u6642\u7121\u6CD5\u53D6\u5F97\uFF0C\u8ACB\u7A0D\u5F8C\u66F4\u65B0" : null, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }, candles.length ? 200 : 503);
   });
   if (url.pathname === "/api/market") return cached(request, 300, async () => json((({ stocks, ...publicData }) => publicData)(await currentMarket())));
   if (url.pathname === "/api/sector") {
