@@ -1,0 +1,10 @@
+# 複製此檔案為 .dev.vars，僅供本機 wrangler dev 使用。
+# 不要提交包含真實金鑰的 .dev.vars。
+FUGLE_API_KEY=
+# 持股資料存取密碼，至少 16 字元；只供本機使用，不要提交。
+PORTFOLIO_PASSWORD=
+
+# 初次建立帳號使用的初始化碼，至少 16 字元。僅保存在伺服器端。
+AUTH_SETUP_TOKEN=
+
+# Workers AI 使用 AI 綁定，不需要 API 金鑰。
