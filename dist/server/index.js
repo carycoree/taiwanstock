@@ -1,3 +1,18 @@
+// worker/index-history.js
+function normalizeIndexHistory(raw) {
+  const rows = raw?.data || [];
+  const result = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const match = String(row[0] || "").match(/^(\d{2,4})\/(\d{1,2})\/(\d{1,2})$/);
+    if (!match) continue;
+    const year = +match[1] < 1911 ? +match[1] + 1911 : +match[1];
+    const time = `${year}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+    const [open, high, low, close] = row.slice(1, 5).map((x) => Number(String(x).replaceAll(",", "")));
+    if ([open, high, low, close].every((x) => Number.isFinite(x) && x > 0) && high >= Math.max(open, close) && low <= Math.min(open, close) && high >= low) result.set(time, { time, open, high, low, close });
+  }
+  return [...result.values()].sort((a, b) => a.time.localeCompare(b.time));
+}
+
 // shared/watchlist.mjs
 function validateWatchlist(items) {
   if (!Array.isArray(items) || items.length > 30) throw new Error("\u81EA\u9078\u80A1\u6700\u591A30\u6A94");
@@ -609,6 +624,20 @@ async function api(request, env, url) {
     const results = matches.slice(0, 30);
     return json({ status: "ok", results, total: matches.length, partial: masterCache.partial, message: masterCache.partial ? "\u90E8\u5206\u5B98\u65B9\u4E3B\u6A94\u66AB\u6642\u672A\u53D6\u5F97\uFF0C\u641C\u5C0B\u6E05\u55AE\u53EF\u80FD\u4E0D\u5B8C\u6574" : matches.length > 30 ? "\u986F\u793A\u524D30\u7B46\uFF0C\u8ACB\u8F38\u5165\u66F4\u5B8C\u6574\u4EE3\u78BC\u6216\u540D\u7A31" : "", source: "TWSE\uFF0FTPEx \u516C\u53F8\u4E3B\u6A94\uFF0BTWSE \u4E0A\u5E02\u65E5\u6210\u4EA4\u5546\u54C1", updatedAt: new Date(masterCache.at).toISOString() });
   }
+  if (url.pathname === "/api/index-history") return cached(request, 300, async () => {
+    const now = new Date((/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+    const reports = await Promise.all([0, 1, 2].map(async (offset) => {
+      const month = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      const key = `${month.getFullYear()}${String(month.getMonth() + 1).padStart(2, "0")}01`;
+      try {
+        return normalizeIndexHistory(await fetchJson(`${TWSE_BASE}/indicesReport/MI_5MINS_HIST?date=${key}&response=json`));
+      } catch {
+        return [];
+      }
+    }));
+    const candles = [...new Map(reports.flat().map((x) => [x.time, x])).values()].sort((a, b) => a.time.localeCompare(b.time));
+    return json({ candles, partial: reports.some((x) => !x.length), source: "\u81FA\u7063\u8B49\u5238\u4EA4\u6613\u6240", fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }, candles.length ? 200 : 503);
+  });
   if (url.pathname === "/api/market") return cached(request, 300, async () => json((({ stocks, ...publicData }) => publicData)(await currentMarket())));
   if (url.pathname === "/api/sector") {
     const name = url.searchParams.get("name") || "";
