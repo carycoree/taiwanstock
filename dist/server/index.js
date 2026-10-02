@@ -3,7 +3,7 @@ function validateWatchlist(items) {
   if (!Array.isArray(items) || items.length > 30) throw new Error("\u81EA\u9078\u80A1\u6700\u591A30\u6A94");
   const seen = /* @__PURE__ */ new Set();
   return items.map((item) => {
-    if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || !/^\d{4,6}$/.test(item[0]) || typeof item[1] !== "string" || item[1].length > 60 || seen.has(item[0])) throw new Error("\u81EA\u9078\u80A1\u683C\u5F0F\u932F\u8AA4\u6216\u4EE3\u78BC\u91CD\u8907");
+    if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || !/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(item[0]) || typeof item[1] !== "string" || item[1].length > 60 || seen.has(item[0])) throw new Error("\u81EA\u9078\u80A1\u683C\u5F0F\u932F\u8AA4\u6216\u4EE3\u78BC\u91CD\u8907");
     seen.add(item[0]);
     return [item[0], item[1].trim() || item[0]];
   });
@@ -106,7 +106,7 @@ function validatePortfolio(value) {
   const holdings = value.holdings.map((h) => {
     if (!h || typeof h.id !== "string" || !/^[\w-]{1,64}$/.test(h.id) || ids.has(h.id)) throw new Error("\u6301\u80A1\u8B58\u5225\u78BC\u91CD\u8907\u6216\u7121\u6548");
     ids.add(h.id);
-    if (!/^\d{4,6}$/.test(h.symbol) || typeof h.name !== "string" || !h.name.trim() || h.name.length > 80) throw new Error("\u8ACB\u586B\u5BEB\u80A1\u7968\u4EE3\u78BC\u8207\u540D\u7A31");
+    if (!/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(h.symbol) || typeof h.name !== "string" || !h.name.trim() || h.name.length > 80) throw new Error("\u8ACB\u586B\u5BEB\u80A1\u7968\u4EE3\u78BC\u8207\u540D\u7A31");
     if (!finite(h.shares, 1, 1e9) || !Number.isInteger(h.shares) || !finite(h.avgCost, 1e-4, 1e7)) throw new Error("\u80A1\u6578\u9808\u70BA\u6B63\u6574\u6578\uFF0C\u5E73\u5747\u6210\u672C\u9808\u5927\u65BC\u96F6");
     if (!finite(h.buyFees, 0, 1e12) || !finite(h.dividends, 0, 1e12) || !finite(h.taxRate, 0, 5)) throw new Error("\u8CBB\u7528\u3001\u80A1\u606F\u6216\u7A05\u7387\u7121\u6548");
     return { id: h.id, symbol: h.symbol, name: h.name.trim(), shares: h.shares, avgCost: h.avgCost, buyFees: h.buyFees, dividends: h.dividends, taxRate: h.taxRate };
@@ -245,7 +245,7 @@ var FUGLE_BASE = "https://api.fugle.tw/marketdata/v1.0/stock";
 var TWSE_BASE = "https://www.twse.com.tw/rwd/zh";
 var TWSE_OPEN = "https://openapi.twse.com.tw/v1/opendata";
 var TPEX_OPEN = "https://www.tpex.org.tw/openapi/v1";
-var masterCache = { at: 0, rows: [] };
+var masterCache = { at: 0, rows: [], partial: true };
 var nightCache = { at: 0, data: null };
 var marketCache = { at: 0, data: null };
 async function currentMarket() {
@@ -266,6 +266,11 @@ async function currentNight() {
   }
 }
 var fallbackSymbols = [
+  ["0052", "\u5BCC\u90A6\u79D1\u6280", "ETF"],
+  ["009816", "\u51F1\u57FA\u53F0\u7063TOP50", "ETF"],
+  ["00981A", "\u4E3B\u52D5\u7D71\u4E00\u53F0\u80A1\u589E\u9577", "ETF"],
+  ["00891", "\u4E2D\u4FE1\u95DC\u9375\u534A\u5C0E\u9AD4", "ETF"],
+  ["00631L", "\u5143\u5927\u53F0\u706350\u6B632", "ETF"],
   ["0050", "\u5143\u5927\u53F0\u706350", "ETF"],
   ["0056", "\u5143\u5927\u9AD8\u80A1\u606F", "ETF"],
   ["006208", "\u5BCC\u90A6\u53F050", "ETF"],
@@ -403,10 +408,11 @@ async function officialPayload(symbol) {
   };
 }
 async function stockMaster() {
-  if (Date.now() - masterCache.at < 36e5 && masterCache.rows.length) return masterCache.rows;
-  const [listed, otc] = await Promise.all([
+  if (Date.now() - masterCache.at < (masterCache.partial ? 6e4 : 36e5) && masterCache.rows.length) return masterCache.rows;
+  const [listed, otc, traded] = await Promise.all([
     fetchJson(`${TWSE_OPEN}/t187ap03_L`).catch(() => []),
-    fetchJson(`${TPEX_OPEN}/mopsfin_t187ap03_O`).catch(() => [])
+    fetchJson(`${TPEX_OPEN}/mopsfin_t187ap03_O`).catch(() => []),
+    fetchJson("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL").catch(() => [])
   ]);
   const normalize = (x, exchange) => ({
     symbol: String(x["\u516C\u53F8\u4EE3\u865F"] || x["\u516C\u53F8\u4EE3\u78BC"] || x["SecuritiesCompanyCode"] || "").trim(),
@@ -414,11 +420,15 @@ async function stockMaster() {
     industry: String(x["\u7522\u696D\u5225"] || x["\u7522\u696D\u985E\u5225"] || x["SecuritiesIndustryCode"] || "\u5176\u4ED6").trim(),
     exchange
   });
-  const official = [...(Array.isArray(listed) ? listed : []).map((x) => normalize(x, "TWSE")), ...(Array.isArray(otc) ? otc : []).map((x) => normalize(x, "TPEx"))].filter((x) => /^\d{4,6}$/.test(x.symbol) && x.name);
+  const official = [...(Array.isArray(listed) ? listed : []).map((x) => normalize(x, "TWSE")), ...(Array.isArray(otc) ? otc : []).map((x) => normalize(x, "TPEx"))].filter((x) => /^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(x.symbol) && x.name);
   const merged = new Map(fallbackSymbols.map((x) => [x.symbol, x]));
+  for (const x of Array.isArray(traded) ? traded : []) {
+    const symbol = String(x.Code || x["\u8B49\u5238\u4EE3\u865F"] || "").trim(), name = String(x.Name || x["\u8B49\u5238\u540D\u7A31"] || "").trim();
+    if (/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(symbol) && name) merged.set(symbol, { symbol, name, industry: symbol.startsWith("00") ? "ETF" : "\u5206\u985E\u5F85\u78BA\u8A8D", exchange: "TWSE" });
+  }
   official.forEach((x) => merged.set(x.symbol, x));
   const rows = [...merged.values()];
-  masterCache = { at: Date.now(), rows };
+  masterCache = { at: Date.now(), rows, partial: !listed?.length || !otc?.length || !traded?.length };
   return masterCache.rows;
 }
 async function marketPayload() {
@@ -562,7 +572,7 @@ async function stockPayload(env, symbol) {
 }
 async function api(request, env, url) {
   if (url.pathname.startsWith("/api/auth/")) return authApi(request, env, url);
-  if (!["/api/health", "/api/search", "/api/market", "/api/night", "/api/sector", "/api/watchlist", "/api/watchlist/prices", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/\d{4,6}$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
+  if (!["/api/health", "/api/search", "/api/market", "/api/night", "/api/sector", "/api/watchlist", "/api/watchlist/prices", "/api/ai/status", "/api/ai/analyze"].includes(url.pathname) && !/^\/api\/stock\/(?:\d{4,6}|\d{4,5}[A-Z])$/.test(url.pathname) && !url.pathname.startsWith("/api/portfolio")) {
     await env.ASSETS.fetch(request);
     return json({ error: "NOT_FOUND" }, 404);
   }
@@ -585,8 +595,9 @@ async function api(request, env, url) {
   if (url.pathname === "/api/search") {
     const q = (url.searchParams.get("q") || "").trim().toLowerCase();
     const master = await stockMaster();
-    const results = master.filter((x) => !q || x.symbol.includes(q) || x.name.toLowerCase().includes(q)).slice(0, 12);
-    return json({ status: "ok", results, source: "TWSE\uFF0FTPEx \u80A1\u7968\u4E3B\u6A94", updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    const matches = master.filter((x) => !q || x.symbol.toLowerCase().includes(q) || x.name.toLowerCase().includes(q)).sort((a, b) => Number(b.symbol.toLowerCase() === q) - Number(a.symbol.toLowerCase() === q) || Number(b.symbol.toLowerCase().startsWith(q)) - Number(a.symbol.toLowerCase().startsWith(q)) || a.symbol.localeCompare(b.symbol));
+    const results = matches.slice(0, 30);
+    return json({ status: "ok", results, total: matches.length, partial: masterCache.partial, message: masterCache.partial ? "\u90E8\u5206\u5B98\u65B9\u4E3B\u6A94\u66AB\u6642\u672A\u53D6\u5F97\uFF0C\u641C\u5C0B\u6E05\u55AE\u53EF\u80FD\u4E0D\u5B8C\u6574" : matches.length > 30 ? "\u986F\u793A\u524D30\u7B46\uFF0C\u8ACB\u8F38\u5165\u66F4\u5B8C\u6574\u4EE3\u78BC\u6216\u540D\u7A31" : "", source: "TWSE\uFF0FTPEx \u516C\u53F8\u4E3B\u6A94\uFF0BTWSE \u4E0A\u5E02\u65E5\u6210\u4EA4\u5546\u54C1", updatedAt: new Date(masterCache.at).toISOString() });
   }
   if (url.pathname === "/api/market") return cached(request, 300, async () => json((({ stocks, ...publicData }) => publicData)(await currentMarket())));
   if (url.pathname === "/api/sector") {
@@ -616,7 +627,7 @@ async function api(request, env, url) {
       return json({ message: "\u8ACB\u6C42\u683C\u5F0F\u932F\u8AA4" }, 400);
     }
     const scope = body?.scope === "market" ? "market" : "stock", symbol = String(body?.symbol || ""), question = body?.question || "";
-    if (typeof question !== "string" || question.length > 500 || scope === "stock" && !/^\d{4,6}$/.test(symbol)) return json({ message: "\u80A1\u7968\u4EE3\u78BC\u6216\u554F\u984C\u683C\u5F0F\u932F\u8AA4\uFF08\u554F\u984C\u6700\u591A500\u5B57\uFF09" }, 400);
+    if (typeof question !== "string" || question.length > 500 || scope === "stock" && !/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(symbol)) return json({ message: "\u80A1\u7968\u4EE3\u78BC\u6216\u554F\u984C\u683C\u5F0F\u932F\u8AA4\uFF08\u554F\u984C\u6700\u591A500\u5B57\uFF09" }, 400);
     try {
       const data = scope === "market" ? await currentMarket() : await stockPayload(env, symbol);
       if (scope === "market" ? !data.index?.close : !data.quote && !data.candles?.length) return json({ message: "\u884C\u60C5\u8CC7\u6599\u4E0D\u8DB3\uFF0C\u66AB\u4E0D\u547C\u53EB AI" }, 422);
@@ -633,7 +644,7 @@ async function api(request, env, url) {
     }
   }
   if (url.pathname === "/api/night") return json(await currentNight());
-  const match = url.pathname.match(/^\/api\/stock\/(\d{4,6})$/);
+  const match = url.pathname.match(/^\/api\/stock\/((?:\d{4,6}|\d{4,5}[A-Z]))$/);
   if (match) return cached(request, 30, async () => json(await stockPayload(env, match[1])));
   await env.ASSETS.fetch(request);
   return json({ error: "NOT_FOUND" }, 404);
@@ -644,7 +655,7 @@ async function watchlistApi(request, env, url) {
   if (url.pathname === "/api/watchlist/prices") {
     if (request.method !== "GET") return json({ message: "\u8ACB\u4F7F\u7528 GET" }, 405);
     const symbols = [...new Set((url.searchParams.get("symbols") || "").split(",").filter(Boolean))];
-    if (symbols.length > 30 || symbols.some((x) => !/^\d{4,6}$/.test(x))) return json({ message: "\u4EE3\u78BC\u932F\u8AA4\u6216\u8D85\u904E30\u6A94" }, 400);
+    if (symbols.length > 30 || symbols.some((x) => !/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(x))) return json({ message: "\u4EE3\u78BC\u932F\u8AA4\u6216\u8D85\u904E30\u6A94" }, 400);
     if (!symbols.length) return json({ quotes: {}, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() });
     const market = await currentMarket(), prices = await portfolioPrices(env, symbols);
     for (const symbol of symbols) {
@@ -685,7 +696,7 @@ async function portfolioOwner(request, env) {
 async function portfolioPrices(env, symbols) {
   let official = [];
   try {
-    official = await fetchJson(`${TWSE_OPEN}/STOCK_DAY_ALL`);
+    official = await fetchJson("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL");
   } catch {
   }
   const quotes = {};
@@ -715,7 +726,7 @@ async function portfolioApi(request, env, url) {
   const owner = await portfolioOwner(request, env);
   if (!owner) return json({ error: "UNAUTHORIZED", message: "\u8ACB\u5148\u767B\u5165\u7DB2\u7AD9" }, 401);
   if (url.pathname === "/api/portfolio/prices" && request.method === "GET") {
-    const symbols = [...new Set((url.searchParams.get("symbols") || "").split(",").filter((x) => /^\d{4,6}$/.test(x)))];
+    const symbols = [...new Set((url.searchParams.get("symbols") || "").split(",").filter((x) => /^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(x)))];
     if (symbols.length > 30) return json({ message: "\u6BCF\u6279\u6700\u591A\u67E5\u8A62 30 \u6A94" }, 400);
     return json(await portfolioPrices(env, symbols));
   }

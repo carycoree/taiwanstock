@@ -8,7 +8,7 @@ export function validatePortfolio(value) {
   const holdings = value.holdings.map(h => {
     if (!h || typeof h.id !== 'string' || !/^[\w-]{1,64}$/.test(h.id) || ids.has(h.id)) throw new Error('持股識別碼重複或無效');
     ids.add(h.id);
-    if (!/^\d{4,6}$/.test(h.symbol) || typeof h.name !== 'string' || !h.name.trim() || h.name.length > 80) throw new Error('請填寫股票代碼與名稱');
+    if (!/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(h.symbol) || typeof h.name !== 'string' || !h.name.trim() || h.name.length > 80) throw new Error('請填寫股票代碼與名稱');
     if (!finite(h.shares, 1, 1e9) || !Number.isInteger(h.shares) || !finite(h.avgCost, 0.0001, 1e7)) throw new Error('股數須為正整數，平均成本須大於零');
     if (!finite(h.buyFees, 0, 1e12) || !finite(h.dividends, 0, 1e12) || !finite(h.taxRate, 0, 5)) throw new Error('費用、股息或稅率無效');
     return { id:h.id, symbol:h.symbol, name:h.name.trim(), shares:h.shares, avgCost:h.avgCost, buyFees:h.buyFees, dividends:h.dividends, taxRate:h.taxRate };
