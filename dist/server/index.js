@@ -22,7 +22,7 @@ function normalizeIndexVolume(raw) {
 
 // shared/watchlist.mjs
 function validateWatchlist(items) {
-  if (!Array.isArray(items) || items.length > 30) throw new Error("\u81EA\u9078\u80A1\u6700\u591A30\u6A94");
+  if (!Array.isArray(items)) throw new Error("\u81EA\u9078\u80A1\u683C\u5F0F\u932F\u8AA4");
   const seen = /* @__PURE__ */ new Set();
   return items.map((item) => {
     if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || !/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(item[0]) || typeof item[1] !== "string" || item[1].length > 60 || seen.has(item[0])) throw new Error("\u81EA\u9078\u80A1\u683C\u5F0F\u932F\u8AA4\u6216\u4EE3\u78BC\u91CD\u8907");
@@ -732,7 +732,6 @@ async function watchlistApi(request, env, url) {
     if (request.method !== "PUT") return json({ message: "\u8ACB\u4F7F\u7528 GET \u6216 PUT" }, 405);
     if (request.headers.get("origin") !== url.origin) return json({ message: "\u4E0D\u5141\u8A31\u8DE8\u7AD9\u5132\u5B58" }, 403);
     const raw = await request.text();
-    if (raw.length > 1e4) return json({ message: "\u8CC7\u6599\u904E\u5927" }, 413);
     let body, items;
     try {
       body = JSON.parse(raw);
